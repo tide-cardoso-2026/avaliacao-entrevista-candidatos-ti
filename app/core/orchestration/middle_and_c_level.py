@@ -2,18 +2,71 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 from pathlib import Path
 
 from app.core.protocols import LLMService
 from app.models.schemas import (
     AgentEvaluation,
     CTOFinalEvaluation,
+    DivergenceFlag,
     FinalIndication,
     FinalRating,
     MiddleManagementEvaluation,
 )
 
 log = logging.getLogger(__name__)
+
+DIVERGENCE_THRESHOLD = 2.0
+CRITICAL_DIVERGENCE_THRESHOLD = 3.5
+
+
+def compute_weighted_score(evaluations: list[AgentEvaluation]) -> float:
+    """Confidence-weighted average: sum(score*confidence) / sum(confidence)."""
+    total_weight = sum(e.confidence for e in evaluations)
+    if total_weight == 0:
+        return 0.0
+    return round(sum(e.score * e.confidence for e in evaluations) / total_weight, 2)
+
+
+def detect_divergences(evaluations: list[AgentEvaluation]) -> list[DivergenceFlag]:
+    """Detect pairs of agents with significant score disagreement."""
+    if len(evaluations) < 2:
+        return []
+
+    flags: list[DivergenceFlag] = []
+    scores = [e.score for e in evaluations]
+    global_spread = max(scores) - min(scores)
+
+    if global_spread >= CRITICAL_DIVERGENCE_THRESHOLD:
+        top = max(evaluations, key=lambda e: e.score)
+        bottom = min(evaluations, key=lambda e: e.score)
+        flags.append(DivergenceFlag(
+            agents_involved=[top.agent_name, bottom.agent_name],
+            score_spread=round(global_spread, 2),
+            description=(
+                f"Divergencia critica: {top.agent_name} ({top.score}) vs "
+                f"{bottom.agent_name} ({bottom.score}). Spread={global_spread:.1f}"
+            ),
+        ))
+
+    high_conf = [e for e in evaluations if e.confidence >= 0.7]
+    if len(high_conf) >= 2:
+        hc_scores = [e.score for e in high_conf]
+        stdev = statistics.stdev(hc_scores) if len(hc_scores) > 1 else 0
+        if stdev >= 1.5:
+            sorted_hc = sorted(high_conf, key=lambda e: e.score)
+            flags.append(DivergenceFlag(
+                agents_involved=[sorted_hc[0].agent_name, sorted_hc[-1].agent_name],
+                score_spread=round(sorted_hc[-1].score - sorted_hc[0].score, 2),
+                description=(
+                    f"Alta variancia entre avaliadores confiaveis (stdev={stdev:.2f}): "
+                    f"{sorted_hc[0].agent_name} ({sorted_hc[0].score}) vs "
+                    f"{sorted_hc[-1].agent_name} ({sorted_hc[-1].score})"
+                ),
+            ))
+
+    return flags
 
 
 class MiddleManagementConsolidator:
@@ -27,6 +80,8 @@ class MiddleManagementConsolidator:
         ]
         if not all(p.exists() for p in self.prompt_paths):
             self.prompt_paths = [self.prompts_root / "middle_management" / "generic_consolidator.md"]
+
+        self._rubric = self._load_rubric()
 
     def run(self, *, assistant_evaluations: list[AgentEvaluation]) -> MiddleManagementEvaluation:
         return self.run_with_documents(
@@ -48,17 +103,37 @@ class MiddleManagementConsolidator:
     ) -> MiddleManagementEvaluation:
         assistants_json = json.dumps([e.model_dump() for e in assistant_evaluations], ensure_ascii=False)
 
-        log.info("Running middle management consolidation (%d prompt(s))", len(self.prompt_paths))
+        divergence_flags = detect_divergences(assistant_evaluations)
+        if divergence_flags:
+            log.warning("Divergences detected: %d flag(s)", len(divergence_flags))
+            for flag in divergence_flags:
+                log.warning("  -> %s", flag.description)
+
+        divergence_summary = ""
+        if divergence_flags:
+            divergence_summary = "\n\nDIVERGENCIAS DETECTADAS AUTOMATICAMENTE:\n" + "\n".join(
+                f"- {f.description}" for f in divergence_flags
+            )
+
+        weighted_score = compute_weighted_score(assistant_evaluations)
+        log.info(
+            "Running middle management consolidation (%d prompt(s)), weighted_score=%.2f",
+            len(self.prompt_paths), weighted_score,
+        )
+
         results: list[MiddleManagementEvaluation] = []
         for prompt_path in self.prompt_paths:
             template = self._load_prompt(prompt_path)
             prompt = (
-                template.replace("{{assistants_evaluations_json}}", assistants_json)
+                template.replace("{{assistants_evaluations_json}}", assistants_json + divergence_summary)
                 .replace("{{job_description_text}}", job_description_text)
                 .replace("{{cv_candidate_text}}", cv_candidate_text)
                 .replace("{{cv_client_text}}", cv_client_text)
                 .replace("{{interview_transcript_text}}", interview_transcript_text)
+                .replace("{{scoring_rubric}}", self._rubric)
             )
+            if "{{scoring_rubric}}" not in template:
+                prompt = self._rubric + "\n\n" + prompt
             payload = self.llm_service.generate_json(prompt=prompt, context="")
             results.append(self._coerce_middle_payload(payload))
 
@@ -67,10 +142,31 @@ class MiddleManagementConsolidator:
                 score_consolidated=0.0,
                 conflicts=[],
                 critical_questions=[],
+                divergence_flags=divergence_flags,
                 analysis="(Sem avaliacao de middle management.)",
             )
 
-        avg_score = sum(r.score_consolidated for r in results) / len(results)
+        manager_scores = [r.score_consolidated for r in results]
+        manager_confidences = [r.confidence for r in results]
+
+        total_conf = sum(manager_confidences)
+        if total_conf > 0:
+            consolidated_score = round(
+                sum(s * c for s, c in zip(manager_scores, manager_confidences)) / total_conf, 2
+            )
+        else:
+            consolidated_score = round(sum(manager_scores) / len(manager_scores), 2)
+
+        if len(manager_scores) > 1:
+            mgr_spread = max(manager_scores) - min(manager_scores)
+            if mgr_spread >= DIVERGENCE_THRESHOLD:
+                divergence_flags.append(DivergenceFlag(
+                    agents_involved=["middle_managers"],
+                    score_spread=round(mgr_spread, 2),
+                    description=f"Divergencia entre middle managers: scores={manager_scores}, spread={mgr_spread:.1f}",
+                ))
+                log.warning("Middle manager divergence: scores=%s, spread=%.1f", manager_scores, mgr_spread)
+
         conflicts: list[str] = []
         critical_questions: list[str] = []
         analysis_parts: list[str] = []
@@ -89,18 +185,35 @@ class MiddleManagementConsolidator:
                 out.append(it)
             return out
 
+        avg_confidence = round(sum(manager_confidences) / len(manager_confidences), 2) if manager_confidences else 1.0
+
         consolidated = MiddleManagementEvaluation(
-            score_consolidated=avg_score,
+            score_consolidated=consolidated_score,
+            confidence=avg_confidence,
             conflicts=_dedupe([c for c in conflicts if c]),
             critical_questions=_dedupe([q for q in critical_questions if q]),
+            divergence_flags=divergence_flags,
             analysis="\n\n".join([p for p in analysis_parts if p.strip()]) or "(Sem analise informada.)",
         )
-        log.info("Middle management score: %.2f", consolidated.score_consolidated)
+        log.info(
+            "Middle management result: score=%.2f, confidence=%.2f, divergences=%d, questions=%d",
+            consolidated.score_consolidated, consolidated.confidence,
+            len(consolidated.divergence_flags), len(consolidated.critical_questions),
+        )
         return consolidated
 
     @staticmethod
     def _coerce_middle_payload(payload: dict) -> MiddleManagementEvaluation:
+        confidence = payload.get("confidence")
+        try:
+            confidence = max(0.0, min(1.0, float(confidence))) if confidence is not None else 1.0
+        except (ValueError, TypeError):
+            confidence = 1.0
+
         if "score_consolidated" in payload:
+            payload = dict(payload)
+            payload["confidence"] = confidence
+            payload.setdefault("divergence_flags", [])
             return MiddleManagementEvaluation(**payload)
 
         if "score" in payload:
@@ -123,8 +236,10 @@ class MiddleManagementConsolidator:
 
             return MiddleManagementEvaluation(
                 score_consolidated=float(payload["score"]),
+                confidence=confidence,
                 conflicts=[str(x) for x in conflicts_detected],
                 critical_questions=[str(x) for x in follow_up_questions],
+                divergence_flags=[],
                 analysis="\n\n".join(analysis_parts) or "(Sem analise informada.)",
             )
 
@@ -133,12 +248,19 @@ class MiddleManagementConsolidator:
     def _load_prompt(self, prompt_path: str | Path) -> str:
         return Path(prompt_path).read_text(encoding="utf-8", errors="ignore")
 
+    def _load_rubric(self) -> str:
+        rubric_path = self.prompts_root / "shared" / "scoring_rubric.md"
+        if rubric_path.exists():
+            return rubric_path.read_text(encoding="utf-8", errors="ignore")
+        return ""
+
 
 class CTOFinalizer:
     def __init__(self, *, llm_service: LLMService, prompts_root: str | Path = "prompts") -> None:
         self.llm_service = llm_service
         self.prompts_root = Path(prompts_root)
         self.prompt_path = str(self.prompts_root / "c_level" / "generic_delivery_manager.md")
+        self._rubric = self._load_rubric()
 
     def run(
         self,
@@ -148,30 +270,42 @@ class CTOFinalizer:
         cv_client_text: str,
         interview_transcript_text: str,
         middle_management_evaluation: MiddleManagementEvaluation,
+        assistant_evaluations: list[AgentEvaluation],
     ) -> CTOFinalEvaluation:
         template = self._load_prompt(self.prompt_path)
         middle_json = json.dumps(middle_management_evaluation.model_dump(), ensure_ascii=False)
+        assistants_json = json.dumps([e.model_dump() for e in assistant_evaluations], ensure_ascii=False)
+
         prompt = (
             template.replace("{{job_description_text}}", job_description_text)
             .replace("{{cv_candidate_text}}", cv_candidate_text)
             .replace("{{cv_client_text}}", cv_client_text)
             .replace("{{interview_transcript_text}}", interview_transcript_text)
             .replace("{{middle_management_json}}", middle_json)
+            .replace("{{assistants_evaluations_json}}", assistants_json)
+            .replace("{{scoring_rubric}}", self._rubric)
         )
+        if "{{scoring_rubric}}" not in template:
+            prompt = self._rubric + "\n\n" + prompt
 
         log.info("Running CTO final evaluation")
         payload = self.llm_service.generate_json(prompt=prompt, context="")
         result = self._coerce_cto_payload(payload)
         log.info(
-            "CTO result: score=%.2f, rating=%s, indication=%s",
-            result.score_final,
-            result.final_rating.value,
-            result.final_indication.value,
+            "CTO result: score=%.2f, rating=%s, indication=%s, confidence=%.2f",
+            result.score_final, result.final_rating.value,
+            result.final_indication.value, result.confidence,
         )
         return result
 
     def _load_prompt(self, prompt_path: str | Path) -> str:
         return Path(prompt_path).read_text(encoding="utf-8", errors="ignore")
+
+    def _load_rubric(self) -> str:
+        rubric_path = self.prompts_root / "shared" / "scoring_rubric.md"
+        if rubric_path.exists():
+            return rubric_path.read_text(encoding="utf-8", errors="ignore")
+        return ""
 
     @staticmethod
     def _decision_to_final_indication(final_decision: str) -> FinalIndication:
@@ -196,7 +330,15 @@ class CTOFinalizer:
         return FinalRating.Especialista
 
     def _coerce_cto_payload(self, payload: dict) -> CTOFinalEvaluation:
+        confidence = payload.get("confidence")
+        try:
+            confidence = max(0.0, min(1.0, float(confidence))) if confidence is not None else 1.0
+        except (ValueError, TypeError):
+            confidence = 1.0
+
         if "final_rating" in payload and "final_indication" in payload:
+            payload = dict(payload)
+            payload["confidence"] = confidence
             return CTOFinalEvaluation(**payload)
 
         if "final_decision" in payload and "final_score" in payload:
@@ -256,6 +398,7 @@ class CTOFinalizer:
                 final_indication=final_indication,
                 risks=[str(r) for r in risks],
                 observations=observations,
+                confidence=confidence,
             )
 
         raise ValueError(f"Unexpected CTO payload format: keys={sorted(payload.keys())}")

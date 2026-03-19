@@ -10,6 +10,8 @@ from app.models.schemas import AgentContext, AgentDefinition, AgentEvaluation, D
 
 log = logging.getLogger(__name__)
 
+RUBRIC_PATH = Path("prompts/shared/scoring_rubric.md")
+
 
 class AgentEngine:
     """Layer 1: specialist assistant agents executed in parallel."""
@@ -24,6 +26,7 @@ class AgentEngine:
         self.llm_service = llm_service
         self.prompts_root = Path(prompts_root)
         self.max_workers = max_workers
+        self._rubric = self._load_rubric()
 
     def run_assistants(
         self,
@@ -40,7 +43,10 @@ class AgentEngine:
                 prompt_template.replace("{{domain}}", agent.domain)
                 .replace("{{agent_name}}", agent.agent_name)
                 .replace("{{context}}", self._build_context_text(agent, documents))
+                .replace("{{scoring_rubric}}", self._rubric)
             )
+            if "{{scoring_rubric}}" not in prompt_template:
+                prompt = self._rubric + "\n\n" + prompt
             payload = self.llm_service.generate_json(prompt=prompt, context="")
             return agent, self._coerce_agent_payload(payload, agent=agent)
 
@@ -55,12 +61,24 @@ class AgentEngine:
                     results.append(evaluation)
                     if on_agent_completed is not None:
                         on_agent_completed(agent.agent_name, evaluation)
-                    log.info("Agent completed: %s (score=%.2f)", agent.agent_name, evaluation.score)
+                    log.info(
+                        "Agent completed: %s (score=%.2f, confidence=%.2f, weighted=%.2f)",
+                        agent.agent_name, evaluation.score, evaluation.confidence, evaluation.weighted_score,
+                    )
                 except Exception:
                     log.exception("Agent failed: %s", agent.agent_name)
                     raise
 
         return results
+
+    def _load_rubric(self) -> str:
+        rubric_path = self.prompts_root / "shared" / "scoring_rubric.md"
+        if rubric_path.exists():
+            return rubric_path.read_text(encoding="utf-8", errors="ignore")
+        if RUBRIC_PATH.exists():
+            return RUBRIC_PATH.read_text(encoding="utf-8", errors="ignore")
+        log.warning("Scoring rubric not found, agents will run without calibration")
+        return ""
 
     @staticmethod
     def _coerce_str_list(items: object) -> list[str]:
@@ -95,12 +113,27 @@ class AgentEngine:
         return out
 
     @staticmethod
+    def _safe_confidence(payload: dict) -> float:
+        raw = payload.get("confidence")
+        if raw is None:
+            return 1.0
+        try:
+            c = float(raw)
+            return max(0.0, min(1.0, c))
+        except (ValueError, TypeError):
+            return 1.0
+
+    @staticmethod
     def _coerce_agent_payload(payload: dict, *, agent: AgentDefinition) -> AgentEvaluation:
+        confidence = AgentEngine._safe_confidence(payload)
+
         if "agent_name" in payload and "domain" in payload:
             payload = dict(payload)
             payload["strengths"] = AgentEngine._coerce_str_list(payload.get("strengths"))
             payload["improvements"] = AgentEngine._coerce_str_list(payload.get("improvements"))
             payload["risks"] = AgentEngine._coerce_str_list(payload.get("risks"))
+            payload["confidence"] = confidence
+            payload.pop("weighted_score", None)
             return AgentEvaluation(**payload)
 
         if "agent" in payload and "score" in payload:
@@ -110,6 +143,7 @@ class AgentEngine:
                 agent_name=agent.agent_name,
                 domain=agent.domain,
                 score=float(payload["score"]),
+                confidence=confidence,
                 strengths=AgentEngine._coerce_str_list(payload.get("strengths")),
                 improvements=AgentEngine._coerce_str_list(improvements),
                 risks=AgentEngine._coerce_str_list(payload.get("risks")),
