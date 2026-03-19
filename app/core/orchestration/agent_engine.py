@@ -31,11 +31,38 @@ class AgentEngine:
             )
 
             payload = self.llm_service.generate_json(prompt=prompt, context="")
-            evaluation = AgentEvaluation(**payload)
+            evaluation = self._coerce_agent_payload(payload, agent=agent)
             results.append(evaluation)
             if on_agent_completed is not None:
                 on_agent_completed(agent.agent_name, evaluation)
         return results
+
+    @staticmethod
+    def _coerce_agent_payload(payload: dict, *, agent: AgentDefinition) -> AgentEvaluation:
+        """
+        Compatibilidade com 2 formatos de JSON:
+        - Formato antigo (AgentEvaluation) usado no scaffold inicial.
+        - Formato da issue #19 (agent/summary/weaknesses/confidence), que aqui mapeamos para
+          AgentEvaluation (improvements/recommendation).
+        """
+        if "agent_name" in payload and "domain" in payload:
+            return AgentEvaluation(**payload)
+
+        # Formato issue #19
+        if "agent" in payload and "score" in payload:
+            recommendation = payload.get("summary") or payload.get("recommendation") or ""
+            improvements = payload.get("weaknesses") or payload.get("improvements") or []
+            return AgentEvaluation(
+                agent_name=agent.agent_name,
+                domain=agent.domain,
+                score=float(payload["score"]),
+                strengths=list(payload.get("strengths") or []),
+                improvements=list(improvements),
+                risks=list(payload.get("risks") or []),
+                recommendation=str(recommendation),
+            )
+
+        raise ValueError(f"Formato de payload inesperado para assistente: chaves={sorted(payload.keys())}")
 
     def _load_prompt(self, prompt_path: str | Path) -> str:
         p = Path(prompt_path)

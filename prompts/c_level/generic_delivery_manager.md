@@ -11,9 +11,16 @@ Tarefa (passo a passo antes de responder):
    - Tatica
    - Operacional
 5. Identificar riscos reais de contratacao (use somente dados do contexto abaixo; se nao houver evidencias, marque como "Sem evidencias no contexto").
-6. Produzir um laudo executivo estruturado dentro do campo `observations` (secoes com titulo e conteudo).
+6. Produzir um laudo executivo estruturado com:
+   - executive_summary
+   - strategic_analysis (visao estrategica em formato texto ou objeto)
+   - technical_analysis (analise tecnica em formato texto ou objeto)
+   - behavioral_analysis (analise comportamental em formato texto ou objeto)
+   - client_benchmark (gap_level + notes)
+   - risks (lista)
+   - recommendations (lista)
 7. Controle anti-alucinacao:
-   - Antes de fechar o JSON, verifique se cada afirmacao em `observations` tem suporte no `middle_management_json` e/ou no `cv_client_text` (e demais entradas quando fornecidas).
+   - Antes de fechar o JSON, verifique se cada afirmacao tem suporte no `middle_management_json` e/ou no `cv_client_text` (e demais entradas quando fornecidas).
    - Nao invente metrics, empresas, tecnologias ou resultados.
    - Nao use generalizacoes. Se faltar informacao, escreva explicitamente "Sem evidencias no contexto".
 
@@ -29,12 +36,21 @@ Entrada (somente estas informacoes podem ser usadas):
 - middle_management_json:
 {{middle_management_json}}
 
-Schema de saida (JSON) - responda com APENAS este objeto JSON:
+Schema de saida (JSON) - responda com APENAS este objeto JSON (issue #19):
 {
-  "final_rating": "Estagiario|Junior|Pleno|Senior|Especialista",
-  "score_final": 0.0,
-  "final_indication": "Aprovar|Aprovar com ressalvas|Reprovar",
+  "agent": "delivery_manager",
+  "final_decision": "APROVAR|APROVAR_COM_RESSALVAS|REPROVAR",
+  "final_score": 0.0,
+  "executive_summary": "Resumo executivo objetivo e baseado em evidencias.",
+  "strategic_analysis": {},
+  "technical_analysis": {},
+  "behavioral_analysis": {},
+  "client_benchmark": {
+    "gap_level": "baixo|moderado|alto|muito_alto",
+    "notes": "observacoes especificas do gap com evidencias (ou 'Sem evidencias no contexto')."
+  },
   "risks": [],
-  "observations": "Resumo executivo; Analise consolidada; Pontos fortes e fracos; Avaliacao multidimensional; Benchmark com cliente; Riscos; Decisao final. Use secoes com quebras de linha."
+  "recommendations": [],
+  "confidence": 0.0
 }
 
