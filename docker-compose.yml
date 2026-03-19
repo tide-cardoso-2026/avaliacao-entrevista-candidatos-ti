@@ -1,0 +1,11 @@
+services:
+  entrevistataking:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data:ro
+      - ./prompts:/app/prompts:ro
+      - ./outputs:/app/outputs
+    environment:
+      - LOG_LEVEL=INFO

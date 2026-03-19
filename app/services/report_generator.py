@@ -33,7 +33,7 @@ class ReportGenerator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now().strftime("%y%m%d_%H%M")
-        out_path = self.output_dir / f"{vaga}_{candidato}_{ts}.pdf"
+        out_path = self.output_dir / f"{candidato}_{vaga}_{ts}.pdf"
 
         styles = getSampleStyleSheet()
         doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Laudo Tecnico")
@@ -151,6 +151,47 @@ class ReportGenerator:
             middle_management_evaluation=mm,
             cto_evaluation=cto,
         )
+
+    def generate_ranking_report(
+        self,
+        *,
+        vaga: str,
+        rankings: list[tuple[str, CTOFinalEvaluation]],
+    ) -> str:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%y%m%d_%H%M")
+        out_path = self.output_dir / f"comparativo_{vaga}_{ts}.pdf"
+
+        styles = getSampleStyleSheet()
+        doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Ranking de Candidatos")
+        story: list[object] = []
+
+        story.append(Paragraph("Ranking Consolidado de Candidatos", styles["Title"]))
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"Vaga: <b>{self._esc(vaga)}</b>", styles["BodyText"]))
+        story.append(Spacer(1, 10))
+
+        if not rankings:
+            story.append(Paragraph("Nenhum candidato avaliado.", styles["BodyText"]))
+        else:
+            ordered = sorted(rankings, key=lambda x: float(x[1].score_final), reverse=True)
+            story.append(Paragraph("Ranking Final", styles["Heading2"]))
+            story.append(Spacer(1, 6))
+            for idx, (candidato, cto) in enumerate(ordered, start=1):
+                story.append(
+                    Paragraph(
+                        f"{idx}. <b>{self._esc(candidato)}</b> | "
+                        f"Score: <b>{cto.score_final:.2f}</b> | "
+                        f"Rating: <b>{self._esc(cto.final_rating.value)}</b> | "
+                        f"Indicacao: <b>{self._esc(cto.final_indication.value)}</b>",
+                        styles["BodyText"],
+                    )
+                )
+                story.append(Spacer(1, 4))
+
+        doc.build(story)
+        return str(out_path)
 
     def _bullet_paragraphs(self, items: Iterable[str]) -> list[Paragraph]:
         result: list[Paragraph] = []

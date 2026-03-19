@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
+
+from app.core.exceptions import AmbiguousDocumentError, DocumentNotFoundError
+
+log = logging.getLogger(__name__)
 
 
 class FileLocator:
@@ -11,7 +16,7 @@ class FileLocator:
     def find_by_stem(self, *, subdir: str, stem_fragment: str, extensions: Iterable[str]) -> Path:
         base = self.root_data_dir / subdir
         if not base.exists():
-            raise FileNotFoundError(f"Pasta de dados nao encontrada: {base}")
+            raise DocumentNotFoundError(f"Pasta de dados nao encontrada: {base}")
 
         ext_list = [e.lower().lstrip(".") for e in extensions]
         fragment = stem_fragment.lower().strip()
@@ -28,16 +33,14 @@ class FileLocator:
                 candidates.append(p)
 
         if len(candidates) == 0:
-            raise FileNotFoundError(
-                f"Nenhum arquivo encontrado em {base} com stem contendo '{stem_fragment}'. "
-                f"Dica: use um nome como '*{stem_fragment}*.txt|md|pdf'."
+            raise DocumentNotFoundError(
+                f"Nenhum arquivo encontrado em {base} com stem contendo '{stem_fragment}'."
             )
         if len(candidates) > 1:
             matches = "\n".join(f"- {c.name}" for c in sorted(candidates, key=lambda x: x.name))
-            raise ValueError(
-                f"Ambiguidade: mais de um arquivo encontrado em {base} para stem '{stem_fragment}'. "
-                f"Refine o nome ou ajuste o stem.\n{matches}"
+            raise AmbiguousDocumentError(
+                f"Ambiguidade: mais de um arquivo encontrado em {base} para stem '{stem_fragment}'.\n{matches}"
             )
 
+        log.debug("Located: %s", candidates[0])
         return candidates[0]
-

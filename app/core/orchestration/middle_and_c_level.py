@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
+from app.core.protocols import LLMService
 from app.models.schemas import (
     AgentEvaluation,
     CTOFinalEvaluation,
@@ -11,12 +13,13 @@ from app.models.schemas import (
     MiddleManagementEvaluation,
 )
 
+log = logging.getLogger(__name__)
+
 
 class MiddleManagementConsolidator:
-    def __init__(self, *, llm_service: object, prompts_root: str | Path = "prompts") -> None:
+    def __init__(self, *, llm_service: LLMService, prompts_root: str | Path = "prompts") -> None:
         self.llm_service = llm_service
         self.prompts_root = Path(prompts_root)
-        # Se existirem templates especializados das issues (#2-#4), rodamos todos e consolidamos.
         self.prompt_paths: list[Path] = [
             self.prompts_root / "middle_management" / "tech_manager.md",
             self.prompts_root / "middle_management" / "product_manager.md",
@@ -26,7 +29,6 @@ class MiddleManagementConsolidator:
             self.prompt_paths = [self.prompts_root / "middle_management" / "generic_consolidator.md"]
 
     def run(self, *, assistant_evaluations: list[AgentEvaluation]) -> MiddleManagementEvaluation:
-        # Mantem API compatível com o scaffold inicial.
         return self.run_with_documents(
             assistant_evaluations=assistant_evaluations,
             job_description_text="",
@@ -46,6 +48,7 @@ class MiddleManagementConsolidator:
     ) -> MiddleManagementEvaluation:
         assistants_json = json.dumps([e.model_dump() for e in assistant_evaluations], ensure_ascii=False)
 
+        log.info("Running middle management consolidation (%d prompt(s))", len(self.prompt_paths))
         results: list[MiddleManagementEvaluation] = []
         for prompt_path in self.prompt_paths:
             template = self._load_prompt(prompt_path)
@@ -64,10 +67,9 @@ class MiddleManagementConsolidator:
                 score_consolidated=0.0,
                 conflicts=[],
                 critical_questions=[],
-                analysis="(MVP) Sem avaliacao de middle management.",
+                analysis="(Sem avaliacao de middle management.)",
             )
 
-        # Consolida de forma deterministica: score media; conflitos/questoes uniao; analise concatenada.
         avg_score = sum(r.score_consolidated for r in results) / len(results)
         conflicts: list[str] = []
         critical_questions: list[str] = []
@@ -77,7 +79,6 @@ class MiddleManagementConsolidator:
             critical_questions.extend(r.critical_questions)
             analysis_parts.append(r.analysis)
 
-        # Dedup preservando ordem.
         def _dedupe(items: list[str]) -> list[str]:
             seen: set[str] = set()
             out: list[str] = []
@@ -88,20 +89,17 @@ class MiddleManagementConsolidator:
                 out.append(it)
             return out
 
-        return MiddleManagementEvaluation(
+        consolidated = MiddleManagementEvaluation(
             score_consolidated=avg_score,
             conflicts=_dedupe([c for c in conflicts if c]),
             critical_questions=_dedupe([q for q in critical_questions if q]),
             analysis="\n\n".join([p for p in analysis_parts if p.strip()]) or "(Sem analise informada.)",
         )
+        log.info("Middle management score: %.2f", consolidated.score_consolidated)
+        return consolidated
 
     @staticmethod
     def _coerce_middle_payload(payload: dict) -> MiddleManagementEvaluation:
-        """
-        Compatibilidade:
-        - Formato antigo (score_consolidated/conflicts/critical_questions/analysis).
-        - Formato issue #19 (score/summary/key_strengths/key_gaps/risks/conflicts_detected/follow_up_questions/confidence).
-        """
         if "score_consolidated" in payload:
             return MiddleManagementEvaluation(**payload)
 
@@ -130,14 +128,14 @@ class MiddleManagementConsolidator:
                 analysis="\n\n".join(analysis_parts) or "(Sem analise informada.)",
             )
 
-        raise ValueError(f"Formato de payload inesperado para middle management: chaves={sorted(payload.keys())}")
+        raise ValueError(f"Unexpected middle management payload format: keys={sorted(payload.keys())}")
 
     def _load_prompt(self, prompt_path: str | Path) -> str:
         return Path(prompt_path).read_text(encoding="utf-8", errors="ignore")
 
 
 class CTOFinalizer:
-    def __init__(self, *, llm_service: object, prompts_root: str | Path = "prompts") -> None:
+    def __init__(self, *, llm_service: LLMService, prompts_root: str | Path = "prompts") -> None:
         self.llm_service = llm_service
         self.prompts_root = Path(prompts_root)
         self.prompt_path = str(self.prompts_root / "c_level" / "generic_delivery_manager.md")
@@ -161,8 +159,16 @@ class CTOFinalizer:
             .replace("{{middle_management_json}}", middle_json)
         )
 
+        log.info("Running CTO final evaluation")
         payload = self.llm_service.generate_json(prompt=prompt, context="")
-        return self._coerce_cto_payload(payload)
+        result = self._coerce_cto_payload(payload)
+        log.info(
+            "CTO result: score=%.2f, rating=%s, indication=%s",
+            result.score_final,
+            result.final_rating.value,
+            result.final_indication.value,
+        )
+        return result
 
     def _load_prompt(self, prompt_path: str | Path) -> str:
         return Path(prompt_path).read_text(encoding="utf-8", errors="ignore")
@@ -174,12 +180,10 @@ class CTOFinalizer:
             return FinalIndication.Reprovar
         if "COM_RESSALVAS" in d or "COM RESSALVAS" in d:
             return FinalIndication.AprovarComRessalvas
-        # APROVADO / APROVAR (fallback)
         return FinalIndication.Aprovar
 
     @staticmethod
     def _score_to_final_rating(score_final: float) -> FinalRating:
-        # Faixas simples para manter o report funcionando mesmo sem o LLM retornar final_rating.
         s = float(score_final)
         if s < 3.0:
             return FinalRating.Estagiario
@@ -192,11 +196,6 @@ class CTOFinalizer:
         return FinalRating.Especialista
 
     def _coerce_cto_payload(self, payload: dict) -> CTOFinalEvaluation:
-        """
-        Compatibilidade:
-        - Formato antigo (final_rating/final_indication/score_final/risks/observations).
-        - Formato issue #19 (final_decision/final_score/executive_summary/.../recommendations/confidence).
-        """
         if "final_rating" in payload and "final_indication" in payload:
             return CTOFinalEvaluation(**payload)
 
@@ -259,5 +258,4 @@ class CTOFinalizer:
                 observations=observations,
             )
 
-        raise ValueError(f"Formato de payload inesperado para CTO: chaves={sorted(payload.keys())}")
-
+        raise ValueError(f"Unexpected CTO payload format: keys={sorted(payload.keys())}")
