@@ -41,8 +41,12 @@ class PipelineOrchestrator:
         )
 
         console.print("[4/6] Consolidando Middle Management...")
-        middle = MiddleManagementConsolidator(llm_service=self.llm_service).run(
-            assistant_evaluations=evaluations
+        middle = MiddleManagementConsolidator(llm_service=self.llm_service).run_with_documents(
+            assistant_evaluations=evaluations,
+            job_description_text=documents.job_description_text,
+            cv_candidate_text=documents.cv_candidate_text,
+            cv_client_text=documents.cv_client_text,
+            interview_transcript_text=documents.interview_transcript_text,
         )
 
         console.print("[5/6] Avaliacao C-Level...")

@@ -16,31 +16,42 @@ class MockLLMService:
     def generate_json(self, *, prompt: str, context: str) -> dict:
         self.calls.append({"prompt": prompt, "context": context})
         # Heuristica simples: decide qual schema esta pedindo com base em tokens do prompt.
-        if '"final_rating"' in prompt or "final_rating" in prompt:
+        if "final_decision" in prompt or "final_score" in prompt:
             return {
-                "final_rating": "Junior",
-                "score_final": 7.2,
-                "final_indication": "Aprovar com ressalvas",
+                "agent": "delivery_manager",
+                "final_decision": "APROVAR_COM_RESSALVAS",
+                "final_score": 7.2,
+                "executive_summary": "(MVP) resumo executivo",
+                "strategic_analysis": {},
+                "technical_analysis": {},
+                "behavioral_analysis": {},
+                "client_benchmark": {"gap_level": "moderado", "notes": "(MVP) notas benchmark"},
                 "risks": ["(MVP) risco exemplo"],
-                "observations": "(MVP) observacoes exemplo",
+                "recommendations": ["(MVP) recomendacao"],
+                "confidence": 0.92,
             }
-        if '"score_consolidated"' in prompt or "score_consolidated" in prompt:
+        if "conflicts_detected" in prompt or "follow_up_questions" in prompt:
             return {
-                "score_consolidated": 7.5,
-                "conflicts": [],
-                "critical_questions": ["(MVP) confirmar alinhamento com requisitos"],
-                "analysis": "(MVP) analise consolidada",
+                "agent": "middle_manager",
+                "score": 7.5,
+                "summary": "(MVP) analise consolidada",
+                "key_strengths": [],
+                "key_gaps": [],
+                "risks": [],
+                "conflicts_detected": [],
+                "follow_up_questions": ["(MVP) confirmar alinhamento com requisitos"],
+                "confidence": 0.9,
             }
 
         # AgentEvaluation
         return {
-            "agent_name": "(MVP) agente",
-            "domain": "(MVP) dominio",
+            "agent": "(MVP) agente",
             "score": 7.0,
+            "summary": "(MVP) recomendacao",
             "strengths": ["(MVP) forca"],
-            "improvements": ["(MVP) melhoria"],
+            "weaknesses": ["(MVP) melhoria"],
             "risks": ["(MVP) risco"],
-            "recommendation": "(MVP) recomendacao",
+            "confidence": 0.85,
         }
 
 
