@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, RateLimitError, APIStatusError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
 
+from app.core.config import settings
+from app.core.exceptions import LLMError, LLMResponseParsingError
+
+log = logging.getLogger(__name__)
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -15,23 +20,31 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 class LLMConfig:
     model: str
     temperature: float = 0.2
-    max_tokens: int = 1500
+    max_tokens: int = 2048
 
 
 class OpenAILLMService:
-    """
-    Chamada ao LLM com garantia pratica de JSON valido.
-    """
+    def __init__(self, model: str | None = None, *, temperature: float = 0.2, max_tokens: int = 2048) -> None:
+        self.cfg = LLMConfig(
+            model=model or settings.DEFAULT_MODEL,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
-    def __init__(self, model: str, *, temperature: float = 0.2, max_tokens: int = 1500) -> None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY nao configurada. Crie um arquivo .env ou exporte a variavel de ambiente."
-            )
-        self.client = OpenAI(api_key=api_key)
-        self.cfg = LLMConfig(model=model, temperature=temperature, max_tokens=max_tokens)
+        if settings.is_openrouter:
+            self.client = OpenAI(api_key=settings.active_api_key, base_url=settings.OPENROUTER_BASE_URL)
+        else:
+            self.client = OpenAI(api_key=settings.active_api_key)
 
+        log.info("LLM service initialized: model=%s, provider=%s", self.cfg.model, "openrouter" if settings.is_openrouter else "openai")
+
+    @retry(
+        retry=retry_if_exception_type((APIConnectionError, RateLimitError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(log, logging.WARNING),
+        reraise=True,
+    )
     def generate_json(self, *, prompt: str, context: str) -> dict:
         user_content = self._build_user_content(prompt=prompt, context=context)
 
@@ -40,35 +53,40 @@ class OpenAILLMService:
             "Nao inclua markdown, nao inclua texto fora do JSON."
         )
 
-        # Alguns modelos suportam response_format, mas nao e garantido. Mantem fallback.
         try:
-            resp = self.client.chat.completions.create(
-                model=self.cfg.model,
-                temperature=self.cfg.temperature,
-                max_tokens=self.cfg.max_tokens,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": user_content},
-                ],
-            )
-        except Exception:
-            resp = self.client.chat.completions.create(
-                model=self.cfg.model,
-                temperature=self.cfg.temperature,
-                max_tokens=self.cfg.max_tokens,
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": user_content},
-                ],
-            )
+            resp = self._call_llm(system_content=system_content, user_content=user_content, structured=True)
+        except APIStatusError as exc:
+            if exc.status_code == 400:
+                log.debug("response_format not supported, falling back to unstructured call")
+                resp = self._call_llm(system_content=system_content, user_content=user_content, structured=False)
+            else:
+                raise LLMError(f"LLM API error (HTTP {exc.status_code}): {exc.message}") from exc
 
         content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            raise LLMResponseParsingError("LLM returned empty content")
+
         json_str = self._extract_json_object(content)
         try:
             return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Falha ao parsear JSON do LLM: {e}. Conteudo (trim): {content[:300]}") from e
+        except json.JSONDecodeError as exc:
+            raise LLMResponseParsingError(
+                f"Failed to parse LLM JSON: {exc}. Content (trimmed): {content[:300]}"
+            ) from exc
+
+    def _call_llm(self, *, system_content: str, user_content: str, structured: bool) -> object:
+        kwargs: dict = {
+            "model": self.cfg.model,
+            "temperature": self.cfg.temperature,
+            "max_tokens": self.cfg.max_tokens,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if structured:
+            kwargs["response_format"] = {"type": "json_object"}
+        return self.client.chat.completions.create(**kwargs)
 
     @staticmethod
     def _build_user_content(*, prompt: str, context: str) -> str:
@@ -78,10 +96,8 @@ class OpenAILLMService:
 
     @staticmethod
     def _extract_json_object(content: str) -> str:
-        # Remove fences ```json ... ```
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         match = _JSON_OBJECT_RE.search(content)
         if not match:
-            raise ValueError("Nenhum objeto JSON encontrado na resposta do LLM.")
+            raise LLMResponseParsingError("No JSON object found in LLM response.")
         return match.group(0)
-
