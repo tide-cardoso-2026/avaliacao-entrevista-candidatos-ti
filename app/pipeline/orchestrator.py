@@ -47,7 +47,11 @@ class PipelineOrchestrator:
 
         console.print("[5/6] Avaliacao C-Level...")
         cto = CTOFinalizer(llm_service=self.llm_service).run(
-            cv_client_text=documents.cv_client_text, middle_management_evaluation=middle
+            job_description_text=documents.job_description_text,
+            cv_candidate_text=documents.cv_candidate_text,
+            cv_client_text=documents.cv_client_text,
+            interview_transcript_text=documents.interview_transcript_text,
+            middle_management_evaluation=middle,
         )
 
         console.print("[6/6] Gerando relatorio final...")

@@ -37,12 +37,21 @@ class CTOFinalizer:
     def run(
         self,
         *,
+        job_description_text: str,
+        cv_candidate_text: str,
         cv_client_text: str,
+        interview_transcript_text: str,
         middle_management_evaluation: MiddleManagementEvaluation,
     ) -> CTOFinalEvaluation:
         template = self._load_prompt(self.prompt_path)
         middle_json = json.dumps(middle_management_evaluation.model_dump(), ensure_ascii=False)
-        prompt = template.replace("{{cv_client_text}}", cv_client_text).replace("{{middle_management_json}}", middle_json)
+        prompt = (
+            template.replace("{{job_description_text}}", job_description_text)
+            .replace("{{cv_candidate_text}}", cv_candidate_text)
+            .replace("{{cv_client_text}}", cv_client_text)
+            .replace("{{interview_transcript_text}}", interview_transcript_text)
+            .replace("{{middle_management_json}}", middle_json)
+        )
 
         payload = self.llm_service.generate_json(prompt=prompt, context="")
         return CTOFinalEvaluation(**payload)

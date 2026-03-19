@@ -170,6 +170,7 @@ class ReportGenerator:
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
+            .replace("\n", "<br/>")
             .replace('"', "&quot;")
         )
 
