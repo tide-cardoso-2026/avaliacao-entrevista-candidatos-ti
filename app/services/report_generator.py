@@ -4,9 +4,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.lib.styles import ParagraphStyle, StyleSheet1, getSampleStyleSheet
+from reportlab.platypus import (
+    HRFlowable,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from app.models.schemas import (
     AgentEvaluation,
@@ -35,94 +44,114 @@ class ReportGenerator:
         ts = datetime.now().strftime("%y%m%d_%H%M")
         out_path = self.output_dir / f"{candidato}_{vaga}_{ts}.pdf"
 
-        styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Laudo Tecnico")
+        styles = self._build_styles()
+        doc = SimpleDocTemplate(
+            str(out_path),
+            pagesize=A4,
+            title="Laudo Tecnico",
+            leftMargin=36,
+            rightMargin=36,
+            topMargin=36,
+            bottomMargin=36,
+        )
 
         story: list[object] = []
-        story.append(Paragraph("Sistema de Avaliacao Inteligente - Laudo Tecnico", styles["Title"]))
+        story.append(Paragraph("Laudo Tecnico de Avaliacao", styles["ReportTitle"]))
+        story.append(Paragraph("Sistema de Avaliacao Inteligente de Candidatos", styles["Subtitle"]))
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Resumo Executivo", styles["Heading2"]))
         story.append(
-            Paragraph(
-                f"Rating Final: <b>{cto_evaluation.final_rating.value}</b> | "
-                f"Indicacao: <b>{cto_evaluation.final_indication.value}</b> | "
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b>",
-                styles["BodyText"],
+            self._meta_table(
+                vaga=vaga,
+                candidato=candidato,
+                generated_at=datetime.now().strftime("%d/%m/%Y %H:%M"),
+                styles=styles,
+            )
+        )
+        story.append(Spacer(1, 14))
+
+        story.append(Paragraph("Resumo Executivo", styles["SectionTitle"]))
+        story.append(
+            self._kpi_table(
+                rows=[
+                    ("Rating Final", cto_evaluation.final_rating.value),
+                    ("Indicacao", cto_evaluation.final_indication.value),
+                    ("Score Final", f"{cto_evaluation.score_final:.2f}/10"),
+                    ("Confianca", f"{cto_evaluation.confidence * 100:.0f}%"),
+                ],
+                styles=styles,
             )
         )
         story.append(Spacer(1, 10))
+        story.append(HRFlowable(width="100%", thickness=0.7, color=colors.HexColor("#D3DCE6")))
+        story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Avaliacoes por Assistente", styles["Heading2"]))
+        story.append(Paragraph("Avaliacoes por Assistente", styles["SectionTitle"]))
         if not assistant_evaluations:
             story.append(Paragraph("Nenhuma avaliacao disponivel no MVP atual.", styles["BodyText"]))
         else:
-            for ev in assistant_evaluations:
-                story.append(Paragraph(f"{ev.agent_name} - Score {ev.score:.2f}/10", styles["Heading3"]))
-                story.append(Paragraph(f"<b>Dominio:</b> {ev.domain}", styles["BodyText"]))
-                story.append(Spacer(1, 6))
-                story.append(Paragraph("<b>Pontos Fortes</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.strengths))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Pontos de Melhoria</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.improvements))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Riscos</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.risks))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Recomendacao</b>", styles["BodyText"]))
-                story.append(Paragraph(self._esc(ev.recommendation), styles["BodyText"]))
-                story.append(Spacer(1, 10))
+            for idx, ev in enumerate(assistant_evaluations, start=1):
+                story.extend(self._assistant_block(index=idx, evaluation=ev, styles=styles))
+                story.append(Spacer(1, 8))
 
-        story.append(Paragraph("Consolidacao Middle Management", styles["Heading2"]))
+        story.append(HRFlowable(width="100%", thickness=0.7, color=colors.HexColor("#D3DCE6")))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Consolidacao Middle Management", styles["SectionTitle"]))
         mm = middle_management_evaluation
-        story.append(
-            Paragraph(f"Score Consolidado: <b>{mm.score_consolidated:.2f}</b>", styles["BodyText"])
-        )
+        story.append(self._simple_highlight(f"Score Consolidado: <b>{mm.score_consolidated:.2f}/10</b>", styles))
         story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Conflitos</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(mm.conflicts))
+        story.append(Paragraph("Conflitos", styles["SubsectionTitle"]))
+        story.extend(self._bullet_paragraphs(mm.conflicts, styles["BulletText"]))
         story.append(Spacer(1, 4))
-        story.append(Paragraph("<b>Questoes Criticas</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(mm.critical_questions))
+        story.append(Paragraph("Questoes Criticas", styles["SubsectionTitle"]))
+        story.extend(self._bullet_paragraphs(mm.critical_questions, styles["BulletText"]))
         story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Analise</b>", styles["BodyText"]))
+        story.append(Paragraph("Analise", styles["SubsectionTitle"]))
         story.append(Paragraph(self._esc(mm.analysis), styles["BodyText"]))
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Analise C-Level (CTO)", styles["Heading2"]))
+        story.append(HRFlowable(width="100%", thickness=0.7, color=colors.HexColor("#D3DCE6")))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Analise C-Level (CTO)", styles["SectionTitle"]))
         story.append(
-            Paragraph(
-                f"Rating: <b>{cto_evaluation.final_rating.value}</b> | "
-                f"Indicacao: <b>{cto_evaluation.final_indication.value}</b> | "
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b>",
-                styles["BodyText"],
+            self._kpi_table(
+                rows=[
+                    ("Rating", cto_evaluation.final_rating.value),
+                    ("Indicacao", cto_evaluation.final_indication.value),
+                    ("Score Final", f"{cto_evaluation.score_final:.2f}/10"),
+                    ("Confianca", f"{cto_evaluation.confidence * 100:.0f}%"),
+                ],
+                styles=styles,
             )
         )
         story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Riscos</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(cto_evaluation.risks))
+        story.append(Paragraph("Riscos", styles["SubsectionTitle"]))
+        story.extend(self._bullet_paragraphs(cto_evaluation.risks, styles["BulletText"]))
         story.append(Spacer(1, 4))
-        story.append(Paragraph("<b>Observacoes</b>", styles["BodyText"]))
+        story.append(Paragraph("Observacoes", styles["SubsectionTitle"]))
         story.append(Paragraph(self._esc(cto_evaluation.observations), styles["BodyText"]))
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Score Final e Recomendacao Final", styles["Heading2"]))
-        story.append(
-            Paragraph(
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b><br/>"
-                f"Recomendacao: <b>{cto_evaluation.final_indication.value}</b>",
-                styles["BodyText"],
+        story.append(Paragraph("Riscos (Resumo Consolidado)", styles["SectionTitle"]))
+        all_risks = list(dict.fromkeys([*mm.conflicts, *cto_evaluation.risks]))
+        story.extend(
+            self._bullet_paragraphs(
+                all_risks if all_risks else ["(Nenhum risco informado)"], styles["BulletText"]
             )
         )
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Riscos (Resumo)", styles["Heading2"]))
-        all_risks = list(dict.fromkeys([*mm.conflicts, *cto_evaluation.risks]))
-        story.extend(self._bullet_paragraphs(all_risks if all_risks else ["- (Nenhum risco informado)"]))
-        story.append(Spacer(1, 10))
-
-        story.append(Paragraph("Observacoes", styles["Heading2"]))
+        story.append(Paragraph("Conclusao e Recomendacao Final", styles["SectionTitle"]))
+        story.append(
+            self._simple_highlight(
+                f"Recomendacao: <b>{self._esc(cto_evaluation.final_indication.value)}</b>",
+                styles,
+            )
+        )
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("Observacoes", styles["SubsectionTitle"]))
         story.append(Paragraph(self._esc(cto_evaluation.observations), styles["BodyText"]))
 
         doc.build(story)
@@ -163,46 +192,348 @@ class ReportGenerator:
         ts = datetime.now().strftime("%y%m%d_%H%M")
         out_path = self.output_dir / f"comparativo_{vaga}_{ts}.pdf"
 
-        styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Ranking de Candidatos")
+        styles = self._build_styles()
+        doc = SimpleDocTemplate(
+            str(out_path),
+            pagesize=A4,
+            title="Ranking de Candidatos",
+            leftMargin=36,
+            rightMargin=36,
+            topMargin=36,
+            bottomMargin=36,
+        )
         story: list[object] = []
 
-        story.append(Paragraph("Ranking Consolidado de Candidatos", styles["Title"]))
+        story.append(Paragraph("Ranking Consolidado de Candidatos", styles["ReportTitle"]))
+        story.append(Paragraph("Comparativo para tomada de decisao", styles["Subtitle"]))
         story.append(Spacer(1, 10))
-        story.append(Paragraph(f"Vaga: <b>{self._esc(vaga)}</b>", styles["BodyText"]))
+        story.append(
+            self._meta_table(
+                vaga=vaga,
+                candidato="Multiplo",
+                generated_at=datetime.now().strftime("%d/%m/%Y %H:%M"),
+                styles=styles,
+            )
+        )
         story.append(Spacer(1, 10))
 
         if not rankings:
             story.append(Paragraph("Nenhum candidato avaliado.", styles["BodyText"]))
         else:
             ordered = sorted(rankings, key=lambda x: float(x[1].score_final), reverse=True)
-            story.append(Paragraph("Ranking Final", styles["Heading2"]))
+            story.append(Paragraph("Ranking Final", styles["SectionTitle"]))
             story.append(Spacer(1, 6))
+            table_rows = [
+                [
+                    Paragraph("<b>Posicao</b>", styles["TableHeader"]),
+                    Paragraph("<b>Candidato</b>", styles["TableHeader"]),
+                    Paragraph("<b>Score</b>", styles["TableHeader"]),
+                    Paragraph("<b>Rating</b>", styles["TableHeader"]),
+                    Paragraph("<b>Indicacao</b>", styles["TableHeader"]),
+                ]
+            ]
             for idx, (candidato, cto) in enumerate(ordered, start=1):
-                story.append(
-                    Paragraph(
-                        f"{idx}. <b>{self._esc(candidato)}</b> | "
-                        f"Score: <b>{cto.score_final:.2f}</b> | "
-                        f"Rating: <b>{self._esc(cto.final_rating.value)}</b> | "
-                        f"Indicacao: <b>{self._esc(cto.final_indication.value)}</b>",
-                        styles["BodyText"],
-                    )
+                table_rows.append(
+                    [
+                        Paragraph(str(idx), styles["TableCell"]),
+                        Paragraph(self._esc(candidato), styles["TableCell"]),
+                        Paragraph(f"{cto.score_final:.2f}", styles["TableCell"]),
+                        Paragraph(self._esc(cto.final_rating.value), styles["TableCell"]),
+                        Paragraph(self._esc(cto.final_indication.value), styles["TableCell"]),
+                    ]
                 )
-                story.append(Spacer(1, 4))
+            ranking_table = Table(table_rows, colWidths=[48, 170, 70, 100, 130], repeatRows=1)
+            ranking_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A5F")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                        ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#C6D2E1")),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                )
+            )
+            story.append(ranking_table)
 
         doc.build(story)
         return str(out_path)
 
-    def _bullet_paragraphs(self, items: Iterable[str]) -> list[Paragraph]:
+    def _assistant_block(
+        self, *, index: int, evaluation: AgentEvaluation, styles: StyleSheet1
+    ) -> list[object]:
+        header = Table(
+            [
+                [
+                    Paragraph(f"{index:02d}", styles["AgentIndex"]),
+                    Paragraph(self._esc(evaluation.agent_name), styles["AgentHeaderText"]),
+                ],
+                [
+                    Paragraph("", styles["AgentIndex"]),
+                    Paragraph(
+                        (
+                            f"<b>Dominio:</b> {self._esc(evaluation.domain)} | "
+                            f"<b>Score:</b> {evaluation.score:.2f}/10 | "
+                            f"<b>Confianca:</b> {evaluation.confidence * 100:.0f}% | "
+                            f"<b>Score Ponderado:</b> {evaluation.weighted_score:.2f}"
+                        ),
+                        styles["AgentMeta"],
+                    ),
+                ],
+            ],
+            colWidths=[38, 490],
+        )
+        header.setStyle(
+            TableStyle(
+                [
+                    ("SPAN", (0, 0), (0, 1)),
+                    ("BACKGROUND", (0, 0), (0, 1), colors.HexColor("#1E3A5F")),
+                    ("BACKGROUND", (1, 0), (1, 1), colors.HexColor("#EEF3F8")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#B7C5D6")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#B7C5D6")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+
+        block: list[object] = [header, Spacer(1, 6)]
+        block.append(Paragraph("Pontos Fortes", styles["SubsectionTitle"]))
+        block.extend(self._bullet_paragraphs(evaluation.strengths, styles["BulletText"]))
+        block.append(Spacer(1, 3))
+        block.append(Paragraph("Pontos de Melhoria", styles["SubsectionTitle"]))
+        block.extend(self._bullet_paragraphs(evaluation.improvements, styles["BulletText"]))
+        block.append(Spacer(1, 3))
+        block.append(Paragraph("Riscos", styles["SubsectionTitle"]))
+        block.extend(self._bullet_paragraphs(evaluation.risks, styles["BulletText"]))
+        block.append(Spacer(1, 3))
+        block.append(Paragraph("Recomendacao", styles["SubsectionTitle"]))
+        block.append(Paragraph(self._esc(evaluation.recommendation), styles["BodyText"]))
+
+        return [KeepTogether(block)]
+
+    def _meta_table(
+        self, *, vaga: str, candidato: str, generated_at: str, styles: StyleSheet1
+    ) -> Table:
+        table = Table(
+            [
+                [
+                    Paragraph("<b>Vaga</b>", styles["MetaLabel"]),
+                    Paragraph(self._esc(vaga), styles["MetaValue"]),
+                    Paragraph("<b>Candidato</b>", styles["MetaLabel"]),
+                    Paragraph(self._esc(candidato), styles["MetaValue"]),
+                ],
+                [
+                    Paragraph("<b>Gerado em</b>", styles["MetaLabel"]),
+                    Paragraph(self._esc(generated_at), styles["MetaValue"]),
+                    Paragraph("<b>Fonte</b>", styles["MetaLabel"]),
+                    Paragraph("Pipeline Multiagente", styles["MetaValue"]),
+                ],
+            ],
+            colWidths=[70, 170, 80, 196],
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#C6D2E1")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        return table
+
+    def _kpi_table(self, *, rows: list[tuple[str, str]], styles: StyleSheet1) -> Table:
+        headers = [Paragraph(f"<b>{self._esc(label)}</b>", styles["KpiHeader"]) for label, _ in rows]
+        values = [Paragraph(self._esc(value), styles["KpiValue"]) for _, value in rows]
+        table = Table([headers, values], colWidths=[129, 129, 129, 129])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A5F")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#EEF3F8")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#B7C5D6")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#B7C5D6")),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        return table
+
+    def _simple_highlight(self, text: str, styles: StyleSheet1) -> Table:
+        table = Table([[Paragraph(text, styles["BodyText"])]], colWidths=[516])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF3F8")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#B7C5D6")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+        return table
+
+    def _bullet_paragraphs(self, items: Iterable[str], style: ParagraphStyle) -> list[Paragraph]:
         result: list[Paragraph] = []
         for it in items:
             if not it:
                 continue
-            result.append(Paragraph(f"• {self._esc(it)}", getSampleStyleSheet()["BodyText"]))
+            result.append(Paragraph(f"• {self._esc(it)}", style))
         if not result:
             # Evita seccoes vazias quebrando layout.
-            result.append(Paragraph("• (Nenhum item informado)", getSampleStyleSheet()["BodyText"]))
+            result.append(Paragraph("• (Nenhum item informado)", style))
         return result
+
+    def _build_styles(self) -> StyleSheet1:
+        styles = getSampleStyleSheet()
+        styles["Title"].fontName = "Helvetica-Bold"
+        styles["BodyText"].fontName = "Helvetica"
+        styles["BodyText"].fontSize = 10
+        styles["BodyText"].leading = 14
+        styles["BodyText"].textColor = colors.HexColor("#1E293B")
+
+        styles.add(
+            ParagraphStyle(
+                name="ReportTitle",
+                parent=styles["Title"],
+                fontSize=22,
+                leading=26,
+                textColor=colors.HexColor("#1E3A5F"),
+                spaceAfter=2,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="Subtitle",
+                parent=styles["BodyText"],
+                fontSize=10,
+                leading=12,
+                textColor=colors.HexColor("#4A6078"),
+                spaceAfter=8,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="SectionTitle",
+                parent=styles["Heading2"],
+                fontName="Helvetica-Bold",
+                fontSize=13,
+                leading=16,
+                textColor=colors.HexColor("#1E3A5F"),
+                spaceBefore=3,
+                spaceAfter=5,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="SubsectionTitle",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                fontSize=10,
+                leading=13,
+                textColor=colors.HexColor("#1E3A5F"),
+                spaceBefore=2,
+                spaceAfter=2,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="BulletText",
+                parent=styles["BodyText"],
+                leftIndent=8,
+                spaceAfter=1,
+            )
+        )
+        styles.add(ParagraphStyle(name="MetaLabel", parent=styles["BodyText"], textColor=colors.HexColor("#3A4A5E")))
+        styles.add(ParagraphStyle(name="MetaValue", parent=styles["BodyText"]))
+        styles.add(
+            ParagraphStyle(
+                name="KpiHeader",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                fontSize=9,
+                leading=11,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="KpiValue",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                fontSize=11,
+                leading=13,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="AgentIndex",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                fontSize=11,
+                textColor=colors.white,
+                alignment=1,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="AgentHeaderText",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                fontSize=11,
+                textColor=colors.HexColor("#1E3A5F"),
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="AgentMeta",
+                parent=styles["BodyText"],
+                fontSize=9,
+                leading=12,
+                textColor=colors.HexColor("#334155"),
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="TableHeader",
+                parent=styles["BodyText"],
+                fontName="Helvetica-Bold",
+                textColor=colors.white,
+                fontSize=9,
+                leading=11,
+            )
+        )
+        styles.add(
+            ParagraphStyle(
+                name="TableCell",
+                parent=styles["BodyText"],
+                fontSize=9,
+                leading=12,
+            )
+        )
+        return styles
 
     @staticmethod
     def _esc(text: str) -> str:
