@@ -7,6 +7,8 @@ __pycache__/
 .env.*
 !.env.example
 outputs/
+staging/output/*.pdf
+data/*.db
 .DS_Store
 .mypy_cache/
 .ruff_cache/
@@ -15,3 +17,21 @@ dist/
 build/
 coverage.xml
 htmlcov/
+.coverage
+
+# Arquivos arquivados em Trash/ (manter apenas este README versionado)
+Trash/*
+!Trash/README.md
+
+# Arquivos binários acidentais em prompts
+prompts/**/*.zip
+
+# Dados locais sensíveis (CVs, transcrições, perfis, JDs reais) — manter só .gitkeep
+data/candidates/*
+!data/candidates/.gitkeep
+data/clients/*
+!data/clients/.gitkeep
+data/interviews/*
+!data/interviews/.gitkeep
+data/job_description/*
+!data/job_description/.gitkeep

@@ -1,0 +1,54 @@
+{
+  "questions": [
+    {
+      "id": "sit-arch-legacy-001",
+      "stack": "backend",
+      "seniority": "mid",
+      "category": "architecture",
+      "prompt": "You inherited a legacy system with frequent downtime. What steps do you take in the first 30 days?",
+      "expectedAnswer": {
+        "level3": "List triage, logs, stabilization, and communication with stakeholders.",
+        "level4": "Adds SLOs, error budgets, incremental strangler patterns, and risk-based prioritization.",
+        "level5": "Discusses org constraints, incident command, capacity planning, and long-term platform strategy."
+      },
+      "evaluationCriteria": [
+        "Structured approach",
+        "Risk and stakeholder awareness",
+        "Concrete operational actions"
+      ],
+      "situational": true
+    },
+    {
+      "id": "sit-prod-pm-001",
+      "stack": "general",
+      "seniority": "senior",
+      "category": "product",
+      "prompt": "The PM wants faster delivery by sacrificing quality. How do you handle it?",
+      "expectedAnswer": {
+        "level3": "Acknowledges trade-offs and proposes scope or sequencing instead of cutting quality blindly.",
+        "level4": "Uses data on defects, debt, and customer impact; negotiates MVP and Definition of Done.",
+        "level5": "Frames portfolio risk, regulatory/compliance angles, and measurable quality gates with leadership."
+      },
+      "evaluationCriteria": [
+        "Trade-off literacy",
+        "Alignment with business outcomes",
+        "Communication with PM and team"
+      ],
+      "situational": true
+    },
+    {
+      "id": "tech-be-rest-001",
+      "stack": "backend",
+      "seniority": "mid",
+      "category": "technical",
+      "prompt": "How do you design idempotent HTTP APIs for payment-like operations?",
+      "expectedAnswer": {
+        "level3": "Mentions idempotency keys and safe retries.",
+        "level4": "Discusses deduplication, state machines, and exactly-once effects at the business layer.",
+        "level5": "Covers distributed consistency, outbox, and verification patterns under failure."
+      },
+      "evaluationCriteria": ["Correct HTTP semantics", "Idempotency patterns", "Failure handling"],
+      "situational": false
+    }
+  ]
+}

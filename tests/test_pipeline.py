@@ -1,37 +1,111 @@
-import pytest
+"""Testes de integração do pipeline, parsing, localização de arquivos e mocks de LLM."""
 
-from app.core.exceptions import AmbiguousDocumentError, DocumentNotFoundError
+import pytest
+from reportlab.pdfgen import canvas
+
+from app.core.exceptions import AmbiguousDocumentError, DocumentNotFoundError, UnsupportedFormatError
 from app.core.orchestration.agent_engine import AgentEngine
-from app.core.orchestration.middle_and_c_level import (
-    compute_weighted_score,
-    detect_divergences,
-    MiddleManagementConsolidator,
-)
+from app.core.orchestration.middle_and_c_level import compute_weighted_score, detect_divergences
 from app.core.protocols import LLMService
+from app.models.executive_report import (
+    CandidateHeader,
+    ConsolidatedAnalysisBlock,
+    DecisionBlock,
+    DomainAnalysisBlock,
+    ExecutiveEvaluationReport,
+    FitBlock,
+    HighlightsBlock,
+    ScoreBreakdown,
+)
 from app.models.schemas import (
     AgentEvaluation,
     CTOFinalEvaluation,
     DocumentSet,
     FinalIndication,
     FinalRating,
-    MiddleManagementEvaluation,
+)
+from app.core.pipeline_events import (
+    PipelineEventKind,
+    ev_run_assistants,
+    format_pipeline_event,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
+from app.services.pipeline_ui_messages import humanize_message, ui_line
 from app.services.parsing_service import ParsingService
 from app.services.report_generator import ReportGenerator
 from app.utils.file_locator import FileLocator
 
-from reportlab.pdfgen import canvas
 
-
+# Deterministic mock that satisfies the LLMService protocol.
 class MockLLMService:
-    """Deterministic mock that satisfies the LLMService protocol."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def generate_json(self, *, prompt: str, context: str) -> dict:
-        self.calls.append({"prompt": prompt, "context": context})
+    def generate_text(self, *, prompt: str, layer: str = "meta", max_tokens: int = 200) -> str:
+        return "[mock humanizado]"
+
+    def generate_json(
+        self,
+        *,
+        prompt: str,
+        context: str,
+        layer: str = "assistants",
+        assistant_model_tier: str | None = None,
+        system_preamble: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "context": context,
+                "layer": layer,
+                "assistant_model_tier": assistant_model_tier,
+                "system_preamble": system_preamble,
+            }
+        )
+
+        # Relatorio executivo (apos CTO) — deve vir antes de heuristica "final_score".
+        if "EXECUTIVE_REPORT_JSON_V1" in prompt:
+            return {
+                "candidate": {"name": "Candidato", "role": "Vaga", "date": "2099-01-01"},
+                "decision": {
+                    "recommendation": "HIRE",
+                    "level": "mid",
+                    "score": 7.4,
+                    "confidence": 0.78,
+                },
+                "highlights": {
+                    "strengths": ["Forca A"],
+                    "gaps": ["Gap B"],
+                    "risks": ["Risco C"],
+                },
+                "summary": "Resumo executivo sintetico.",
+                "score_breakdown": {
+                    "technical": 7.4,
+                    "architecture": 6.5,
+                    "product": 6.0,
+                    "communication": 5.5,
+                },
+                "consolidated_analysis": {
+                    "strengths": ["Forca consolidada"],
+                    "attention_points": ["Atencao 1"],
+                    "risks": ["Risco consolidado"],
+                },
+                "domain_analysis": {
+                    "backend": ["APIs REST solidas"],
+                    "frontend": [],
+                    "devops": [],
+                    "security": ["JWT basico"],
+                    "behavioral": ["Comunicacao clara"],
+                },
+                "conflicts": ["Divergencia exemplo"],
+                "fit": {
+                    "expected_level": "Senior",
+                    "evaluated_level": "Pleno",
+                    "gap": -1,
+                    "recommendation": "Aprovar com ajuste de expectativa.",
+                },
+            }
 
         # Agent selector
         if "selected_agents" in prompt:
@@ -52,11 +126,14 @@ class MockLLMService:
                 "final_decision": "APROVAR_COM_RESSALVAS",
                 "final_score": 7.2,
                 "executive_summary": "resumo executivo",
-                "strategic_analysis": {},
+                "strategic_analysis": {"assessment": "Sinal estrategico moderado.", "evidence": ["ev1"]},
+                "tactical_analysis": {"assessment": "", "evidence": []},
+                "operational_analysis": {"assessment": "", "evidence": []},
                 "technical_analysis": {},
                 "behavioral_analysis": {},
                 "client_benchmark": {"gap_level": "moderado", "notes": "notas benchmark"},
-                "risks": ["risco exemplo"],
+                "risks": [{"description": "risco exemplo", "impact": "medio", "probability": "media"}],
+                "tradeoffs": ["Forte stack, pouca evidencia de lideranca"],
                 "recommendations": ["recomendacao"],
                 "confidence": 0.92,
             }
@@ -84,6 +161,7 @@ class MockLLMService:
                 "strengths": ["forca revisada"],
                 "weaknesses": ["melhoria revisada"],
                 "risks": ["risco"],
+                "missing_evidence": [],
                 "follow_up_answers": {},
                 "confidence": 0.9,
             }
@@ -96,6 +174,7 @@ class MockLLMService:
             "strengths": ["forca"],
             "weaknesses": ["melhoria"],
             "risks": ["risco"],
+            "missing_evidence": [],
             "confidence": 0.85,
         }
 
@@ -105,6 +184,24 @@ class MockLLMService:
 def test_mock_satisfies_protocol():
     mock = MockLLMService()
     assert isinstance(mock, LLMService)
+
+
+def test_pipeline_ui_line_and_humanize_log():
+    text = ui_line("run_assistants", count=22)
+    assert "22" in text
+    assert "pareceres" in text.lower()
+    h = humanize_message("Step 4/8: Running 22 specialist assistants")
+    assert "22" in h
+    assert "pareceres" in h.lower()
+
+
+def test_pipeline_event_core_model():
+    ev = ev_run_assistants(count=22)
+    assert ev.kind == PipelineEventKind.RUN_ASSISTANTS
+    assert ev.step == 4
+    assert ev.payload["count"] == 22
+    assert "22" in format_pipeline_event(ev)
+    assert ev.model_dump()["kind"] == "run_assistants"
 
 
 # --- Parsing ---
@@ -145,7 +242,7 @@ def test_parsing_service_unsupported_format(tmp_path):
     ps = ParsingService()
     weird = tmp_path / "file.xyz"
     weird.write_text("nope", encoding="utf-8")
-    with pytest.raises(Exception):
+    with pytest.raises(UnsupportedFormatError):
         ps.load_text(weird)
 
 
@@ -239,38 +336,41 @@ def test_agent_engine_executes_assistants_with_mock_llm():
 
 def test_report_generator_creates_pdf(tmp_path):
     rg = ReportGenerator(output_dir=tmp_path / "outputs" / "reports")
-    mm = MiddleManagementEvaluation(
-        score_consolidated=7.5,
-        conflicts=[],
-        critical_questions=["Q1"],
-        analysis="Analise",
-    )
-    cto = CTOFinalEvaluation(
-        final_rating=FinalRating.Junior,
-        score_final=7.2,
-        final_indication=FinalIndication.AprovarComRessalvas,
-        risks=["risk1"],
-        observations="obs",
-    )
-    assistants = [
-        AgentEvaluation(
-            agent_name="Dev Backend",
-            domain="Backend",
-            score=7.0,
+    executive = ExecutiveEvaluationReport(
+        candidate=CandidateHeader(name="Cand", role="Vaga X", date="2099-01-01"),
+        decision=DecisionBlock(
+            recommendation="HIRE",
+            level="mid",
+            score=7.2,
             confidence=0.85,
-            strengths=["s"],
-            improvements=["i"],
-            risks=["r"],
-            recommendation="rec",
-        )
-    ]
-    out = rg.generate_report(
-        vaga="vaga",
-        candidato="cand",
-        assistant_evaluations=assistants,
-        middle_management_evaluation=mm,
-        cto_evaluation=cto,
+        ),
+        highlights=HighlightsBlock(
+            strengths=["S1"],
+            gaps=["G1"],
+            risks=["R1"],
+        ),
+        summary="Resumo.",
+        score_breakdown=ScoreBreakdown(
+            technical=7.0,
+            architecture=7.0,
+            product=7.0,
+            communication=7.0,
+        ),
+        consolidated_analysis=ConsolidatedAnalysisBlock(
+            strengths=["S1"],
+            attention_points=["A1"],
+            risks=["R1"],
+        ),
+        domain_analysis=DomainAnalysisBlock(backend=["B1"]),
+        conflicts=[],
+        fit=FitBlock(
+            expected_level="Senior",
+            evaluated_level="Pleno",
+            gap=-1,
+            recommendation="Ok.",
+        ),
     )
+    out = rg.generate_report(vaga="vaga", candidato="cand", executive=executive)
     assert out.endswith(".pdf")
     assert (tmp_path / "outputs" / "reports").exists()
 
@@ -327,7 +427,7 @@ def test_pipeline_single_candidate_mock_llm(tmp_path):
     )
     orchestrator.file_locator.root_data_dir = data_dir
 
-    out_path = orchestrator.run(vaga="vaga", candidato="candidato", client=None)
+    out_path = orchestrator.run(vaga="vaga", candidato="candidato", client=None, save_history=False)
     assert out_path.endswith(".pdf")
 
 
@@ -352,7 +452,9 @@ def test_pipeline_client_optional_when_clients_folder_empty(tmp_path):
     )
     orchestrator.file_locator.root_data_dir = data_dir
 
-    details = orchestrator.run_with_details(vaga="vaga", candidato="candidato", client=None, generate_report=False)
+    details = orchestrator.run_with_details(
+        vaga="vaga", candidato="candidato", client=None, generate_report=False, save_history=False
+    )
     assert details.report_path is None
     assert details.cto_evaluation.score_final >= 0.0
     assert details.cto_evaluation.confidence > 0.0
@@ -380,7 +482,9 @@ def test_pipeline_with_all_features_enabled(tmp_path):
     )
     orchestrator.file_locator.root_data_dir = data_dir
 
-    details = orchestrator.run_with_details(vaga="vaga", candidato="candidato", client=None, generate_report=True)
+    details = orchestrator.run_with_details(
+        vaga="vaga", candidato="candidato", client=None, generate_report=True, save_history=False
+    )
     assert details.report_path is not None
     assert details.report_path.endswith(".pdf")
     assert details.cto_evaluation.score_final >= 0.0
