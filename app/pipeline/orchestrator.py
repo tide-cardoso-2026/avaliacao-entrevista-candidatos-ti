@@ -48,6 +48,7 @@ from app.models.schemas import (
     DocumentSet,
     MiddleManagementEvaluation,
 )
+from app.services.assistants_evaluation_pdf import write_assistants_evaluation_pdf
 from app.services.executive_report_service import build_executive_report
 from app.services.parsing_service import ParsingService
 from app.services.report_generator import ReportGenerator
@@ -78,6 +79,7 @@ class PipelineOrchestrator:
         middle_management_evaluation: MiddleManagementEvaluation
         cto_evaluation: CTOFinalEvaluation
         report_path: str | None = None
+        assistants_pre_middle_pdf_path: str | None = None
         agents_selected: int = 0
         agents_total: int = 0
         follow_up_round_executed: bool = False
@@ -186,6 +188,24 @@ class PipelineOrchestrator:
         )
         evaluations = normalize_agent_evaluations(evaluations)
         _present_sub(ev_run_assistants_done(n=len(evaluations)))
+
+        assistants_pre_middle_pdf: str | None = None
+        try:
+            pre_middle_dir = self.report_generator.output_dir.parent / "assistants_pre_middle"
+            report_cand = candidato_display or candidato
+            pdf_pre = write_assistants_evaluation_pdf(
+                output_dir=pre_middle_dir,
+                evaluations=evaluations,
+                job_title=vaga,
+                candidate_name=report_cand,
+                title="EntrevistaTaking — Especialistas (pre-middle management)",
+                footer_note="Gerado automaticamente antes da consolidacao middle management.",
+                include_consolidation_summary=True,
+            )
+            assistants_pre_middle_pdf = str(pdf_pre)
+            log.info("PDF avaliacao assistentes (pre-middle): %s", assistants_pre_middle_pdf)
+        except Exception:
+            log.exception("Falha ao gerar PDF dos assistentes antes do middle management")
 
         # Step 5: Middle managers (paralelo) + deliberação condicional + merge / pré-CTO
         _present(ev_middle_consolidate())
@@ -308,6 +328,7 @@ class PipelineOrchestrator:
             middle_management_evaluation=middle,
             cto_evaluation=cto,
             report_path=report_path,
+            assistants_pre_middle_pdf_path=assistants_pre_middle_pdf,
             agents_selected=agents_selected,
             agents_total=agents_total,
             follow_up_round_executed=follow_up_executed,
@@ -462,7 +483,10 @@ class PipelineOrchestrator:
         cv_candidate_path = self.file_locator.find_by_stem(
             subdir="candidates", stem_fragment=candidato, extensions=exts
         )
-        interview_path = self.file_locator.find_by_stem(subdir="interviews", stem_fragment=candidato, extensions=exts)
+        interview_path = self.file_locator.find_interview_transcript(
+            stem_fragment=candidato,
+            extensions=exts,
+        )
 
         cv_client_fragment = client or vaga
         cv_client_text = self._safe_load_client_text(cv_client_fragment=cv_client_fragment, extensions=exts)

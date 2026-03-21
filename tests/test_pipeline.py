@@ -32,6 +32,7 @@ from app.core.pipeline_events import (
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.services.pipeline_ui_messages import humanize_message, ui_line
 from app.services.parsing_service import ParsingService
+from app.services.assistants_evaluation_pdf import write_assistants_evaluation_pdf
 from app.services.report_generator import ReportGenerator
 from app.utils.file_locator import FileLocator
 
@@ -271,6 +272,26 @@ def test_file_locator_not_found(tmp_path):
         locator.find_by_stem(subdir="job_description", stem_fragment="nonexistent", extensions=[".txt"])
 
 
+def test_file_locator_interview_fallback_when_single_file(tmp_path):
+    """Sem nome a casar com o candidato: se existir só uma transcrição, usa-a."""
+    base = tmp_path / "data"
+    (base / "interviews").mkdir(parents=True)
+    (base / "interviews" / "[TRANSCRICAO] Denis tecnico.docx").write_bytes(b"PK\x03\x04fake")
+    locator = FileLocator(root_data_dir=base)
+    p = locator.find_interview_transcript(stem_fragment="Douglas Lima", extensions=[".docx", ".txt", ".md", ".pdf"])
+    assert p.name == "[TRANSCRICAO] Denis tecnico.docx"
+
+
+def test_file_locator_interview_ambiguous_when_multiple_no_match(tmp_path):
+    base = tmp_path / "data"
+    (base / "interviews").mkdir(parents=True)
+    (base / "interviews" / "a.docx").write_bytes(b"PK\x03\x04")
+    (base / "interviews" / "b.docx").write_bytes(b"PK\x03\x04")
+    locator = FileLocator(root_data_dir=base)
+    with pytest.raises(AmbiguousDocumentError):
+        locator.find_interview_transcript(stem_fragment="Zed", extensions=[".docx"])
+
+
 # --- Confidence & Divergence (B, E) ---
 
 def test_confidence_weighted_score():
@@ -330,6 +351,22 @@ def test_agent_engine_executes_assistants_with_mock_llm():
         assert isinstance(ev, AgentEvaluation)
         assert 0.0 <= ev.score <= 10.0
         assert 0.0 <= ev.confidence <= 1.0
+
+
+def test_coerce_agent_payload_accepts_partial_llm_json():
+    """LLM fraco pode devolver só score/confidence/missing_evidence sem agent/summary."""
+    from app.core.domain_rules.agent_registry import AgentRegistry
+
+    agent = AgentRegistry().get_assistants()[0]
+    ev = AgentEngine._coerce_agent_payload(
+        {"score": 6.0, "confidence": 0.4, "missing_evidence": ["Sem detalhe X no CV"]},
+        agent=agent,
+    )
+    assert ev.agent_name == agent.agent_name
+    assert ev.domain == agent.domain
+    assert ev.score == 6.0
+    assert ev.confidence == 0.4
+    assert len(ev.missing_evidence) == 1
 
 
 # --- Report Generator ---
@@ -427,8 +464,13 @@ def test_pipeline_single_candidate_mock_llm(tmp_path):
     )
     orchestrator.file_locator.root_data_dir = data_dir
 
-    out_path = orchestrator.run(vaga="vaga", candidato="candidato", client=None, save_history=False)
-    assert out_path.endswith(".pdf")
+    details = orchestrator.run_with_details(
+        vaga="vaga", candidato="candidato", client=None, save_history=False, generate_report=True
+    )
+    assert details.report_path
+    assert details.report_path.endswith(".pdf")
+    assert details.assistants_pre_middle_pdf_path
+    assert details.assistants_pre_middle_pdf_path.endswith(".pdf")
 
 
 def test_pipeline_client_optional_when_clients_folder_empty(tmp_path):
@@ -456,6 +498,8 @@ def test_pipeline_client_optional_when_clients_folder_empty(tmp_path):
         vaga="vaga", candidato="candidato", client=None, generate_report=False, save_history=False
     )
     assert details.report_path is None
+    assert details.assistants_pre_middle_pdf_path
+    assert details.assistants_pre_middle_pdf_path.endswith(".pdf")
     assert details.cto_evaluation.score_final >= 0.0
     assert details.cto_evaluation.confidence > 0.0
 
@@ -487,4 +531,43 @@ def test_pipeline_with_all_features_enabled(tmp_path):
     )
     assert details.report_path is not None
     assert details.report_path.endswith(".pdf")
+    assert details.assistants_pre_middle_pdf_path
+    assert details.assistants_pre_middle_pdf_path.endswith(".pdf")
     assert details.cto_evaluation.score_final >= 0.0
+
+
+def test_assistants_evaluation_pdf_pre_middle(tmp_path):
+    ev = [
+        AgentEvaluation(
+            agent_name="A",
+            domain="Backend",
+            score=8.0,
+            confidence=0.9,
+            strengths=["s"],
+            improvements=["i"],
+            risks=["r"],
+            recommendation="ok",
+        ),
+        AgentEvaluation(
+            agent_name="B",
+            domain="Arquitetura",
+            score=3.0,
+            confidence=0.8,
+            strengths=["s2"],
+            improvements=["i2"],
+            risks=["r2"],
+            recommendation="cuidado",
+        ),
+    ]
+    out = write_assistants_evaluation_pdf(
+        output_dir=tmp_path / "assistants_pre_middle",
+        evaluations=ev,
+        job_title="Vaga X",
+        candidate_name="Cand Y",
+        title="Test",
+        footer_note="test",
+        include_consolidation_summary=True,
+    )
+    assert out.is_file()
+    assert out.stat().st_size > 0
+    assert "assistants_pre_middle" in str(out)
