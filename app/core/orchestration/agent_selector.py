@@ -1,3 +1,5 @@
+"""Seleção dinâmica de assistentes com base na descrição da vaga (uma chamada LLM meta)."""
+
 from __future__ import annotations
 
 import logging
@@ -9,14 +11,16 @@ from app.models.schemas import AgentDefinition
 log = logging.getLogger(__name__)
 
 
+# Reduz o conjunto de assistentes enviados ao pipeline conforme relevância para a vaga.
 class AgentSelector:
-    """Pre-filters the agent list based on job description relevance using an LLM call."""
 
+    # Aponta para `prompts/meta/agent_selector.md` e guarda referência ao LLM.
     def __init__(self, *, llm_service: LLMService, prompts_root: str | Path = "prompts") -> None:
         self.llm_service = llm_service
         self.prompts_root = Path(prompts_root)
         self.prompt_path = self.prompts_root / "meta" / "agent_selector.md"
 
+    # Chama o modelo com a lista de agentes; filtra por nome ou devolve todos se falhar/ inválido.
     def select(
         self,
         *,
@@ -24,7 +28,6 @@ class AgentSelector:
         all_agents: list[AgentDefinition],
     ) -> list[AgentDefinition]:
         if not self.prompt_path.exists():
-            log.warning("Agent selector prompt not found at %s, using all agents", self.prompt_path)
             return all_agents
 
         template = self.prompt_path.read_text(encoding="utf-8", errors="ignore")
@@ -38,7 +41,7 @@ class AgentSelector:
         )
 
         try:
-            payload = self.llm_service.generate_json(prompt=prompt, context="")
+            payload = self.llm_service.generate_json(prompt=prompt, context="", layer="meta")
         except Exception:
             log.exception("Agent selection failed, falling back to all agents")
             return all_agents
@@ -59,7 +62,7 @@ class AgentSelector:
             return all_agents
 
         excluded = [a.agent_name for a in all_agents if a.agent_name.lower() not in selected_set]
-        log.info(
+        log.debug(
             "Agent selection: %d/%d agents selected. Excluded: %s",
             len(filtered), len(all_agents), excluded or "(none)",
         )

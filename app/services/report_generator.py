@@ -1,34 +1,61 @@
+"""Geração de PDF (ReportLab): laudo executivo consolidado e ranking comparativo."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.lib.units import cm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from app.models.schemas import (
-    AgentEvaluation,
-    CTOFinalEvaluation,
-    FinalIndication,
-    FinalRating,
-    MiddleManagementEvaluation,
+from app.models.executive_report import ExecutiveEvaluationReport
+from app.models.schemas import CTOFinalEvaluation
+from app.services.executive_report_service import (
+    WEIGHT_ARCHITECTURE,
+    WEIGHT_COMMUNICATION,
+    WEIGHT_PRODUCT,
+    WEIGHT_TECHNICAL,
+    build_fallback_executive_report,
+    normalize_executive_report,
+    weighted_final_score as exec_weighted_final_score,
 )
 
 
+# Rótulos PT-BR para recomendação e nível.
+def _label_recommendation(code: str) -> str:
+    if code == "STRONG_HIRE":
+        return "Contratar (forte)"
+    if code == "NO_HIRE":
+        return "Não contratar"
+    return "Aprovar"
+
+
+def _label_level(code: str) -> str:
+    return {
+        "junior": "Júnior",
+        "mid": "Pleno",
+        "senior": "Senior",
+        "staff": "Staff",
+    }.get(code.lower(), code)
+
+
+# Monta PDF executivo a partir do contrato `ExecutiveEvaluationReport`.
 class ReportGenerator:
+    # Define diretório de saída dos relatórios (criado sob demanda).
     def __init__(self, *, output_dir: str | Path = "outputs/reports") -> None:
         self.output_dir = Path(output_dir)
 
+    # PDF executivo (1–2 páginas): capa, scorecard, consolidação, domínios, fit.
     def generate_report(
         self,
         *,
         vaga: str,
         candidato: str,
-        assistant_evaluations: list[AgentEvaluation],
-        middle_management_evaluation: MiddleManagementEvaluation,
-        cto_evaluation: CTOFinalEvaluation,
+        executive: ExecutiveEvaluationReport,
     ) -> str:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -36,100 +63,139 @@ class ReportGenerator:
         out_path = self.output_dir / f"{candidato}_{vaga}_{ts}.pdf"
 
         styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Laudo Tecnico")
-
+        doc = SimpleDocTemplate(str(out_path), pagesize=A4, title="Laudo Executivo")
         story: list[object] = []
-        story.append(Paragraph("Sistema de Avaliacao Inteligente - Laudo Tecnico", styles["Title"]))
-        story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Resumo Executivo", styles["Heading2"]))
+        story.append(Paragraph("Avaliacao de Candidato", styles["Title"]))
+        story.append(Spacer(1, 8))
         story.append(
             Paragraph(
-                f"Rating Final: <b>{cto_evaluation.final_rating.value}</b> | "
-                f"Indicacao: <b>{cto_evaluation.final_indication.value}</b> | "
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b>",
+                f"<b>Candidato:</b> {self._esc(executive.candidate.name)}<br/>"
+                f"<b>Vaga:</b> {self._esc(executive.candidate.role)}<br/>"
+                f"<b>Data:</b> {self._esc(executive.candidate.date)}",
                 styles["BodyText"],
             )
         )
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Avaliacoes por Assistente", styles["Heading2"]))
-        if not assistant_evaluations:
-            story.append(Paragraph("Nenhuma avaliacao disponivel no MVP atual.", styles["BodyText"]))
-        else:
-            for ev in assistant_evaluations:
-                story.append(Paragraph(f"{ev.agent_name} - Score {ev.score:.2f}/10", styles["Heading3"]))
-                story.append(Paragraph(f"<b>Dominio:</b> {ev.domain}", styles["BodyText"]))
-                story.append(Spacer(1, 6))
-                story.append(Paragraph("<b>Pontos Fortes</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.strengths))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Pontos de Melhoria</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.improvements))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Riscos</b>", styles["BodyText"]))
-                story.extend(self._bullet_paragraphs(ev.risks))
-                story.append(Spacer(1, 4))
-                story.append(Paragraph("<b>Recomendacao</b>", styles["BodyText"]))
-                story.append(Paragraph(self._esc(ev.recommendation), styles["BodyText"]))
-                story.append(Spacer(1, 10))
-
-        story.append(Paragraph("Consolidacao Middle Management", styles["Heading2"]))
-        mm = middle_management_evaluation
-        story.append(
-            Paragraph(f"Score Consolidado: <b>{mm.score_consolidated:.2f}</b>", styles["BodyText"])
-        )
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Conflitos</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(mm.conflicts))
-        story.append(Spacer(1, 4))
-        story.append(Paragraph("<b>Questoes Criticas</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(mm.critical_questions))
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Analise</b>", styles["BodyText"]))
-        story.append(Paragraph(self._esc(mm.analysis), styles["BodyText"]))
-        story.append(Spacer(1, 10))
-
-        story.append(Paragraph("Analise C-Level (CTO)", styles["Heading2"]))
+        d = executive.decision
+        story.append(Paragraph("Decisao Final", styles["Heading2"]))
+        conf_pct = int(round(d.confidence * 100))
         story.append(
             Paragraph(
-                f"Rating: <b>{cto_evaluation.final_rating.value}</b> | "
-                f"Indicacao: <b>{cto_evaluation.final_indication.value}</b> | "
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b>",
-                styles["BodyText"],
-            )
-        )
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Riscos</b>", styles["BodyText"]))
-        story.extend(self._bullet_paragraphs(cto_evaluation.risks))
-        story.append(Spacer(1, 4))
-        story.append(Paragraph("<b>Observacoes</b>", styles["BodyText"]))
-        story.append(Paragraph(self._esc(cto_evaluation.observations), styles["BodyText"]))
-        story.append(Spacer(1, 10))
-
-        story.append(Paragraph("Score Final e Recomendacao Final", styles["Heading2"]))
-        story.append(
-            Paragraph(
-                f"Score Final: <b>{cto_evaluation.score_final:.2f}</b><br/>"
-                f"Recomendacao: <b>{cto_evaluation.final_indication.value}</b>",
+                f"<b>Recomendacao:</b> {_label_recommendation(d.recommendation)}<br/>"
+                f"<b>Nivel:</b> {_label_level(d.level)}<br/>"
+                f"<b>Score:</b> {d.score:.1f} / 10<br/>"
+                f"<b>Confianca:</b> {conf_pct}%",
                 styles["BodyText"],
             )
         )
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Riscos (Resumo)", styles["Heading2"]))
-        all_risks = list(dict.fromkeys([*mm.conflicts, *cto_evaluation.risks]))
-        story.extend(self._bullet_paragraphs(all_risks if all_risks else ["- (Nenhum risco informado)"]))
+        h = executive.highlights
+        story.append(Paragraph("Principais Riscos", styles["Heading2"]))
+        story.extend(self._bullet_paragraphs(h.risks or ["(Nenhum risco informado)"]))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("Principais Forcas", styles["Heading2"]))
+        story.extend(self._bullet_paragraphs(h.strengths or ["(Nenhum item informado)"]))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("Principais Gaps", styles["Heading2"]))
+        story.extend(self._bullet_paragraphs(h.gaps or ["(Nenhum gap informado)"]))
         story.append(Spacer(1, 10))
 
-        story.append(Paragraph("Observacoes", styles["Heading2"]))
-        story.append(Paragraph(self._esc(cto_evaluation.observations), styles["BodyText"]))
+        story.append(Paragraph("Leitura Executiva (Resumo)", styles["Heading2"]))
+        story.append(Paragraph(self._esc(executive.summary), styles["BodyText"]))
+        story.append(Spacer(1, 8))
+
+        sb = executive.score_breakdown
+        wf = exec_weighted_final_score(sb)
+        data = [
+            ["Dimensao", "Score", "Peso", "Resultado"],
+            [
+                "Tecnico",
+                f"{sb.technical:.1f}",
+                "40%",
+                f"{sb.technical * WEIGHT_TECHNICAL:.2f}",
+            ],
+            [
+                "Arquitetura",
+                f"{sb.architecture:.1f}",
+                "30%",
+                f"{sb.architecture * WEIGHT_ARCHITECTURE:.2f}",
+            ],
+            [
+                "Produto",
+                f"{sb.product:.1f}",
+                "20%",
+                f"{sb.product * WEIGHT_PRODUCT:.2f}",
+            ],
+            [
+                "Comunicacao",
+                f"{sb.communication:.1f}",
+                "10%",
+                f"{sb.communication * WEIGHT_COMMUNICATION:.2f}",
+            ],
+            ["", "", "Score final:", f"{wf:.1f}"],
+        ]
+        tbl = Table(data, colWidths=[1.8 * cm, 1.6 * cm, 1.6 * cm, 1.8 * cm])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ]
+            )
+        )
+        story.append(Paragraph("Score por Dimensao", styles["Heading2"]))
+        story.append(Spacer(1, 6))
+        story.append(tbl)
+        story.append(Spacer(1, 10))
+
+        ca = executive.consolidated_analysis
+        story.append(Paragraph("Analise Consolidada", styles["Heading2"]))
+        story.append(Paragraph(self._esc("Pontos Fortes"), styles["Heading3"]))
+        story.extend(self._bullet_paragraphs(ca.strengths))
+        story.append(Paragraph(self._esc("Pontos de Atencao"), styles["Heading3"]))
+        story.extend(self._bullet_paragraphs(ca.attention_points))
+        story.append(Paragraph(self._esc("Riscos"), styles["Heading3"]))
+        story.extend(self._bullet_paragraphs(ca.risks))
+        story.append(Spacer(1, 8))
+
+        dom = executive.domain_analysis
+        story.append(Paragraph("Avaliacao por Dominio (resumida)", styles["Heading2"]))
+        self._domain_section(story, styles, "Backend", dom.backend)
+        self._domain_section(story, styles, "Frontend", dom.frontend)
+        self._domain_section(story, styles, "DevOps", dom.devops)
+        self._domain_section(story, styles, "Seguranca", dom.security)
+        self._domain_section(story, styles, "Comportamental", dom.behavioral)
+        story.append(Spacer(1, 8))
+
+        if executive.conflicts:
+            story.append(Paragraph("Conflitos de Avaliacao", styles["Heading2"]))
+            story.extend(self._bullet_paragraphs(executive.conflicts))
+            story.append(Spacer(1, 8))
+
+        fit = executive.fit
+        story.append(Paragraph("Fit para a Vaga", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                f"<b>Senioridade esperada:</b> {self._esc(fit.expected_level)}<br/>"
+                f"<b>Senioridade avaliada:</b> {self._esc(fit.evaluated_level)}<br/>"
+                f"<b>Gap (niveis):</b> {fit.gap}<br/>"
+                f"<b>Recomendacao:</b> {self._esc(fit.recommendation)}",
+                styles["BodyText"],
+            )
+        )
 
         doc.build(story)
         return str(out_path)
 
+    # Laudo com placeholders (smoke test); usa fallback determinístico.
     def generate_minimal_report(self, *, vaga: str, candidato: str) -> str:
-        # Utilizado pelo smoke test do scaffold.
+        from app.models.schemas import FinalIndication, FinalRating, MiddleManagementEvaluation
+
         mm = MiddleManagementEvaluation(
             score_consolidated=0.0,
             conflicts=[],
@@ -143,15 +209,18 @@ class ReportGenerator:
             risks=[],
             observations="(MVP) Analise ainda nao executada.",
         )
-        # Nao ha avaliacoes no smoke test.
-        return self.generate_report(
-            vaga=vaga,
-            candidato=candidato,
-            assistant_evaluations=[],
-            middle_management_evaluation=mm,
-            cto_evaluation=cto,
+        ex = normalize_executive_report(
+            build_fallback_executive_report(
+                vaga=vaga,
+                candidato_display=candidato,
+                assistant_evaluations=[],
+                middle=mm,
+                cto=cto,
+            )
         )
+        return self.generate_report(vaga=vaga, candidato=candidato, executive=ex)
 
+    # PDF comparativo ordenando candidatos pelo score final do CTO.
     def generate_ranking_report(
         self,
         *,
@@ -193,20 +262,35 @@ class ReportGenerator:
         doc.build(story)
         return str(out_path)
 
+    # Secção opcional por domínio (omitir se vazia).
+    def _domain_section(
+        self,
+        story: list[object],
+        styles: object,
+        title: str,
+        items: Iterable[str],
+    ) -> None:
+        lst = [x for x in items if (x or "").strip()]
+        if not lst:
+            return
+        story.append(Paragraph(self._esc(title), styles["Heading3"]))
+        story.extend(self._bullet_paragraphs(lst))
+
+    # Converte lista de strings em parágrafos com marcadores para o PDF.
     def _bullet_paragraphs(self, items: Iterable[str]) -> list[Paragraph]:
+        styles = getSampleStyleSheet()
         result: list[Paragraph] = []
         for it in items:
             if not it:
                 continue
-            result.append(Paragraph(f"• {self._esc(it)}", getSampleStyleSheet()["BodyText"]))
+            result.append(Paragraph(f"• {self._esc(it)}", styles["BodyText"]))
         if not result:
-            # Evita seccoes vazias quebrando layout.
-            result.append(Paragraph("• (Nenhum item informado)", getSampleStyleSheet()["BodyText"]))
+            result.append(Paragraph("• (Nenhum item informado)", styles["BodyText"]))
         return result
 
     @staticmethod
+    # Escapa HTML/XML mínimo para `Paragraph` do ReportLab.
     def _esc(text: str) -> str:
-        # ReportLab Paragraph usa um subconjunto de HTML-like tags.
         return (
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -214,4 +298,3 @@ class ReportGenerator:
             .replace("\n", "<br/>")
             .replace('"', "&quot;")
         )
-

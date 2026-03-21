@@ -1,0 +1,14 @@
+{
+  "goldenAnswers": [
+    {
+      "questionId": "tech-be-rest-001",
+      "expectedScore": 4.0,
+      "explanation": "Resposta solida menciona idempotency keys, retries e efeitos de negocio sem vazar para fantasia."
+    },
+    {
+      "questionId": "sit-arch-legacy-001",
+      "expectedScore": 3.5,
+      "explanation": "Bom candidato lista estabilizacao, observabilidade e plano incremental; senior exige mais nuance de risco."
+    }
+  ]
+}

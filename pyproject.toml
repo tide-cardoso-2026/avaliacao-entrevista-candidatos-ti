@@ -23,6 +23,11 @@ dependencies = [
     "pypdf>=4.0.0",
     "python-docx>=1.0.0",
     "tenacity>=8.0.0",
+    "sqlalchemy>=2.0.0",
+    "httpx>=0.27.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +56,9 @@ ignore = ["E501"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-v --tb=short"
+markers = [
+    "staging: pré-validação (contratos de dados, base técnica) antes do núcleo do pipeline",
+]
 
 [tool.mypy]
 python_version = "3.12"

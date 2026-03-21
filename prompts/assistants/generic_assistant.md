@@ -7,8 +7,10 @@ Tarefa:
 - Gere uma resposta estruturada em JSON, aderente ao schema abaixo.
 - Nao inclua texto fora do JSON.
 
-Contexto (injetado pelo sistema):
-{{context}}
+{{few_shot_examples}}
+
+Insumos (vaga, CV, transcricao, materiais):
+O texto completo esta na secao [CONTEXT] desta mensagem do usuario.
 
 Regras do JSON (issue #19):
 - Todos os agentes devem retornar JSON valido (apenas um objeto).
