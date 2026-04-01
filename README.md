@@ -4,6 +4,8 @@ Pipeline multi-agente que gera laudos técnicos em PDF para avaliação de candi
 
 ## Arquitetura
 
+Board completo com diagrama detalhado: [`docs/board_arquitetura.md`](docs/board_arquitetura.md)
+
 ```
 CLI (app/main.py)
     │
